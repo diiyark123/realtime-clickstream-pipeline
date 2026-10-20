@@ -1,0 +1,102 @@
+name: clickstream
+
+x-pg-env: &pg-env
+  POSTGRES_DB: ${POSTGRES_DB:-clickstream}
+  POSTGRES_USER: ${POSTGRES_USER:-pipeline}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pipeline}
+
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    ports:
+      - "9092:9092"          # for clients on your machine
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller        # KRaft mode, no ZooKeeper
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists
+      --topic ${KAFKA_TOPIC:-clickstream_events} --partitions 3 --replication-factor 1
+      --config retention.ms=86400000 &&
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe --topic ${KAFKA_TOPIC:-clickstream_events}"
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment: *pg-env
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql:/sql:ro
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  producer:
+    build: ./producer
+    container_name: producer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-clickstream_events}
+      EVENTS_PER_SECOND: ${EVENTS_PER_SECOND:-50}
+    restart: unless-stopped
+
+  spark:
+    build: ./spark
+    container_name: spark
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-clickstream_events}
+      POSTGRES_HOST: postgres
+      WATERMARK_DELAY: ${WATERMARK_DELAY:-2 minutes}
+      METRICS_WINDOW: ${METRICS_WINDOW:-1 minute}
+      TRIGGER_INTERVAL: ${TRIGGER_INTERVAL:-10 seconds}
+      LAKE_DIR: /data/lake/events
+      CHECKPOINT_DIR: /data/checkpoints
+    ports:
+      - "4040:4040"          # Spark UI
+    volumes:
+      - ./data:/data
+      - ivy-cache:/root/.ivy2
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ivy-cache:

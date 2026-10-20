@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local settings and secrets (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Pipeline data: lake, checkpoints (keep the folder itself)
+data/*
+!data/.gitkeep
+
+# Spark / Hive local artifacts
+spark-warehouse/
+metastore_db/
+derby.log
+*.log
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Word lock files created while a .docx is open
+~$*.docx
